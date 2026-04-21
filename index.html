@@ -1,0 +1,825 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mol viewer</title>
+<script src="https://3dmol.org/build/3Dmol-min.js"></script>
+<style>
+  :root {
+    --fg: #1a1a1a;
+    --fg-dim: #666;
+    --bg: #ffffff;
+    /* Fully opaque — avoid `backdrop-filter: blur(...)` over the live WebGL
+       canvas. Chrome re-computes the blur each frame while the user rotates,
+       which is extremely expensive and was making collection mode choppy. */
+    --panel: #ffffff;
+    --border: #e4e4e4;
+    --border-strong: #c8c8c8;
+    --accent: #1a1a1a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Inter", "Helvetica Neue", sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    overflow: hidden;
+  }
+  #viewer, #grid {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+  }
+  #grid { display: none; }
+  #grid.on { display: block; }
+  #grid-labels {
+    position: absolute; inset: 0;
+    display: none;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: repeat(3, 1fr);
+    pointer-events: none;
+    z-index: 5;
+  }
+  #grid-labels.on { display: grid; }
+  .grid-label {
+    font: 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--fg-dim);
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 7px;
+    margin: 6px;
+    align-self: start;
+    justify-self: start;
+    pointer-events: auto;
+    cursor: pointer;
+    user-select: none;
+  }
+  .grid-label:hover { color: var(--fg); border-color: var(--border-strong); }
+  .grid-label.empty { visibility: hidden; }
+  .grid-divider {
+    position: absolute;
+    background: var(--border);
+    pointer-events: none;
+    z-index: 4;
+  }
+  .badge {
+    position: absolute; top: 12px; left: 14px;
+    font: 11px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--fg-dim);
+    letter-spacing: 0.02em;
+    pointer-events: none;
+    user-select: none;
+  }
+  #controls, #coll-controls {
+    position: absolute; left: 50%; bottom: 16px;
+    transform: translateX(-50%);
+    display: none;
+    align-items: center;
+    gap: 14px;
+    padding: 8px 14px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+    max-width: calc(100vw - 32px);
+  }
+  #controls.on, #coll-controls.on { display: flex; }
+  #coll-counter, #coll-atoms {
+    font: 11px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--fg-dim);
+    user-select: none;
+  }
+  #coll-counter { min-width: 110px; text-align: center; }
+  #coll-prev, #coll-next { width: 30px; padding: 4px 0; text-align: center; }
+  button {
+    font: inherit;
+    color: var(--fg);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: background 0.1s, border-color 0.1s;
+  }
+  button:hover { border-color: var(--border-strong); background: #fafafa; }
+  button.active { border-color: var(--accent); background: var(--accent); color: #fff; }
+  #play { width: 34px; padding: 4px 0; text-align: center; }
+  #slider {
+    -webkit-appearance: none; appearance: none;
+    width: 280px; height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+  #slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+  }
+  #slider::-moz-range-thumb {
+    width: 14px; height: 14px; border: none;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+  }
+  #counter {
+    font: 11px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--fg-dim);
+    min-width: 72px; text-align: center;
+    user-select: none;
+  }
+  .speeds { display: flex; gap: 4px; }
+  .speeds button { padding: 4px 7px; font-size: 11px; }
+  .sep { width: 1px; height: 20px; background: var(--border); }
+
+  #message {
+    position: absolute; inset: 0;
+    display: none;
+    align-items: center; justify-content: center;
+    padding: 32px;
+    text-align: center;
+  }
+  #message.on { display: flex; }
+  #message .inner { max-width: 440px; }
+  #message h1 {
+    font-size: 15px; font-weight: 600; margin: 0 0 10px;
+    letter-spacing: 0.01em;
+  }
+  #message p {
+    margin: 0; color: var(--fg-dim); font-size: 13px;
+  }
+  #message code {
+    font: 11px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+    background: #f4f4f4;
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+  #message.error h1 { color: #b91c1c; }
+
+  #paste-btn {
+    position: absolute; top: 12px; right: 14px;
+    font: 11px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--fg-dim);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 9px;
+    cursor: pointer;
+    z-index: 10;
+  }
+  #paste-btn:hover { color: var(--fg); border-color: var(--border-strong); }
+
+  #paste-overlay {
+    position: absolute; inset: 0;
+    display: none;
+    align-items: center; justify-content: center;
+    background: rgba(255, 255, 255, 0.92);
+    padding: 32px;
+    z-index: 20;
+  }
+  #paste-overlay.on { display: flex; }
+  #paste-card {
+    width: 100%; max-width: 560px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+    padding: 20px;
+  }
+  #paste-card h2 {
+    font-size: 14px; font-weight: 600; margin: 0 0 4px;
+  }
+  #paste-card p {
+    font-size: 12px; color: var(--fg-dim); margin: 0 0 12px;
+  }
+  #paste-card code {
+    font: 11px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    background: #f4f4f4; padding: 1px 5px; border-radius: 3px;
+  }
+  #paste-input {
+    width: 100%;
+    min-height: 140px;
+    font: 11px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--fg);
+    background: #fafafa;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    resize: vertical;
+    outline: none;
+  }
+  #paste-input:focus { border-color: var(--border-strong); background: #fff; }
+  #paste-actions {
+    display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px;
+  }
+  #paste-submit { background: var(--accent); color: #fff; border-color: var(--accent); }
+  #paste-submit:hover { background: #000; border-color: #000; }
+  .hint {
+    font: 11px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--fg-dim);
+    margin-right: auto; align-self: center;
+  }
+</style>
+</head>
+<body>
+  <div id="viewer"></div>
+  <div id="grid"></div>
+  <div id="grid-labels"></div>
+  <div id="badge" class="badge"></div>
+
+  <div id="controls">
+    <button id="play" title="Play/pause (Space)">▶</button>
+    <input id="slider" type="range" min="0" max="0" value="0">
+    <div id="counter">0 / 0</div>
+    <div class="sep"></div>
+    <div class="speeds" id="speeds"></div>
+  </div>
+
+  <div id="coll-controls">
+    <button id="coll-prev" title="Previous (←)">◀</button>
+    <div id="coll-counter">molecule 0 / 0</div>
+    <button id="coll-next" title="Next (→)">▶</button>
+    <div class="sep"></div>
+    <div id="coll-atoms">0 atoms</div>
+    <div class="sep"></div>
+    <button id="coll-view-toggle" title="Toggle grid view (G)">▦</button>
+  </div>
+
+  <div id="message">
+    <div class="inner">
+      <h1 id="msg-title">paste a molecule URL to view</h1>
+      <p id="msg-body">This viewer expects a payload in the URL fragment, e.g.<br><code>#d=&lt;base64url&gt;</code></p>
+    </div>
+  </div>
+
+  <button id="paste-btn" title="Paste a new molecule (P)">paste</button>
+
+  <div id="paste-overlay">
+    <div id="paste-card">
+      <h2>Paste molecule URL or payload</h2>
+      <p>Accepts a full URL, a <code>#d=…</code> fragment, or just the base64url payload. Whitespace and wrap artifacts are OK.</p>
+      <textarea id="paste-input" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+      <div id="paste-actions">
+        <span class="hint">⌘/Ctrl+Enter to submit · Esc to close</span>
+        <button id="paste-cancel">Cancel</button>
+        <button id="paste-submit">View</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+"use strict";
+
+const Z_TO_SYM = {1:'H',5:'B',6:'C',7:'N',8:'O',9:'F',14:'Si',15:'P',16:'S',17:'Cl',35:'Br',53:'I'};
+
+// Terminal copy-paste can inject garbage into a URL: soft line wraps add
+// whitespace or '\', shells may tack on '%' / '\r', some shells line-continue
+// with backslash, editors smart-quote, etc. Base64url's alphabet is
+// [A-Za-z0-9_-], so anything outside that is definitely not part of the
+// payload and can be stripped safely.
+function sanitizeB64Url(s) {
+  // Percent-encoded bytes (e.g. %0A for newline) can show up if the URL
+  // round-tripped through something that encoded whitespace. Try to decode
+  // once; if it's malformed, fall through to the raw filter.
+  let t = s;
+  if (t.indexOf('%') !== -1) {
+    try { t = decodeURIComponent(t); } catch { /* keep original */ }
+  }
+  return t.replace(/[^A-Za-z0-9_-]/g, '');
+}
+
+async function decodeMolPayload(b64urlStr) {
+  const cleaned = sanitizeB64Url(b64urlStr);
+  if (cleaned.length === 0) throw new Error('empty payload');
+  const b64 = cleaned.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = (4 - b64.length % 4) % 4;
+  let raw;
+  try {
+    raw = Uint8Array.from(atob(b64 + '='.repeat(pad)), c => c.charCodeAt(0));
+  } catch (e) {
+    throw new Error('base64 decode failed');
+  }
+  if (raw.length < 1) throw new Error('empty payload');
+
+  let body;
+  if (raw[0] === 0x67) {
+    try {
+      const stream = new Blob([raw.slice(1)]).stream()
+        .pipeThrough(new DecompressionStream('gzip'));
+      body = new Uint8Array(await new Response(stream).arrayBuffer());
+    } catch (e) {
+      throw new Error('gzip decompression failed');
+    }
+  } else if (raw[0] === 0x72) {
+    body = raw.slice(1);
+  } else {
+    throw new Error('unknown prefix byte: 0x' + raw[0].toString(16));
+  }
+
+  if (body.length < 10) throw new Error('payload truncated (header)');
+
+  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+  const version = view.getUint8(0);
+  if (version !== 1) {
+    throw new Error(`payload version ${version} not supported; viewer may be out of date`);
+  }
+  const flags = view.getUint8(1);
+  const N = view.getUint16(2, true);
+  const F = view.getUint16(4, true);
+  const scale = view.getFloat32(6, true);
+  const isCollection = (flags & 2) !== 0;
+  const isDelta = (flags & 1) !== 0;
+  const inv = scale / 32767;
+
+  if (F === 0) {
+    throw new Error(isCollection ? 'payload has zero molecules' : 'payload has zero frames');
+  }
+  if (isCollection && isDelta) {
+    throw new Error('invalid flags: delta + collection');
+  }
+
+  if (isCollection) {
+    // Body: F back-to-back (uint16 N_i | uint8×N_i atomic_numbers | int16×N_i×3 coords)
+    const molecules = new Array(F);
+    let off = 10;
+    for (let i = 0; i < F; i++) {
+      if (off + 2 > body.length) throw new Error(`truncated at molecule ${i} header`);
+      const Ni = view.getUint16(off, true); off += 2;
+      if (Ni === 0) throw new Error(`molecule ${i} has zero atoms`);
+      const needed = Ni + Ni * 6;
+      if (off + needed > body.length) throw new Error(`truncated at molecule ${i} body`);
+      const atomicNumbers = Array.from(body.slice(off, off + Ni)); off += Ni;
+      // Copy to a fresh (aligned) buffer before int16 view; Ni may be odd.
+      const coordBytes = body.slice(off, off + Ni * 6);
+      const coords = new Int16Array(coordBytes.buffer, 0, Ni * 3);
+      off += Ni * 6;
+      const frame = new Array(Ni);
+      for (let a = 0; a < Ni; a++) {
+        frame[a] = [coords[a*3] * inv, coords[a*3 + 1] * inv, coords[a*3 + 2] * inv];
+      }
+      molecules[i] = { N: Ni, atomicNumbers, frames: [frame] };
+    }
+    return { mode: 'collection', M: F, molecules };
+  }
+
+  if (N === 0) throw new Error('payload has zero atoms');
+
+  const expected = 10 + N + F * N * 3 * 2;
+  if (body.length < expected) throw new Error('payload truncated (coords)');
+
+  const atomicNumbers = Array.from(body.slice(10, 10 + N));
+  const coordsOffset = 10 + N;
+  // Copy to an aligned buffer — the source offset may not be 2-byte aligned.
+  const raw16Src = body.slice(coordsOffset, coordsOffset + F * N * 3 * 2);
+  const raw16 = new Int16Array(raw16Src.buffer, raw16Src.byteOffset, F * N * 3);
+
+  const frames = new Array(F);
+
+  if (isDelta) {
+    const cum = new Int32Array(F * N * 3);
+    for (let i = 0; i < N * 3; i++) cum[i] = raw16[i];
+    for (let f = 1; f < F; f++) {
+      const base = f * N * 3;
+      for (let i = 0; i < N * 3; i++) {
+        cum[base + i] = cum[base - N * 3 + i] + raw16[base + i];
+      }
+    }
+    for (let f = 0; f < F; f++) {
+      const frame = new Array(N);
+      for (let a = 0; a < N; a++) {
+        const o = f * N * 3 + a * 3;
+        frame[a] = [cum[o] * inv, cum[o + 1] * inv, cum[o + 2] * inv];
+      }
+      frames[f] = frame;
+    }
+  } else {
+    for (let f = 0; f < F; f++) {
+      const frame = new Array(N);
+      for (let a = 0; a < N; a++) {
+        const o = f * N * 3 + a * 3;
+        frame[a] = [raw16[o] * inv, raw16[o + 1] * inv, raw16[o + 2] * inv];
+      }
+      frames[f] = frame;
+    }
+  }
+
+  return { mode: F === 1 ? 'single' : 'trajectory', N, F, atomicNumbers, frames };
+}
+
+function frameToXYZ(atomicNumbers, frame, comment = '') {
+  const lines = [String(atomicNumbers.length), comment];
+  for (let i = 0; i < atomicNumbers.length; i++) {
+    const sym = Z_TO_SYM[atomicNumbers[i]] || 'X';
+    const [x, y, z] = frame[i];
+    lines.push(`${sym} ${x.toFixed(4)} ${y.toFixed(4)} ${z.toFixed(4)}`);
+  }
+  return lines.join('\n');
+}
+
+function multiFrameXYZ(atomicNumbers, frames) {
+  return frames.map((fr, i) => frameToXYZ(atomicNumbers, fr, `frame ${i}`)).join('\n');
+}
+
+function showMessage(title, body, isError = false) {
+  const msg = document.getElementById('message');
+  document.getElementById('msg-title').textContent = title;
+  document.getElementById('msg-body').innerHTML = body;
+  msg.classList.toggle('error', isError);
+  msg.classList.add('on');
+}
+
+function setBadge(text) {
+  document.getElementById('badge').textContent = text;
+}
+
+function extractPayload(frag) {
+  if (!frag) return null;
+  // Match `d=<value>` allowing whitespace around key / equals, and stop at
+  // an unambiguous separator. We intentionally include whitespace and '\'
+  // inside the captured value — sanitizeB64Url strips them later.
+  const m = frag.match(/(?:^|[?&#])\s*d\s*=\s*([^&]*)/i);
+  if (m) return m[1];
+  // Fall back: if the fragment itself looks like a bare base64url blob (no
+  // 'd=' prefix at all — common when someone forgets it), try that.
+  const bare = frag.replace(/[^A-Za-z0-9_-]/g, '');
+  return bare.length > 8 ? bare : null;
+}
+
+// Normalize whatever the user pasted into a value suitable for location.hash.
+// Accepts: a full URL (http/https/file... with '#d=...'), a bare '#d=...',
+// a 'd=...' string, or just the base64url payload on its own.
+function normalizePasted(input) {
+  let s = String(input || '').trim();
+  if (!s) return null;
+  const hashIdx = s.indexOf('#');
+  if (hashIdx !== -1) s = s.slice(hashIdx + 1);
+  // If it already has a d= key, keep as-is (whitespace allowed).
+  if (/^\s*d\s*=/i.test(s)) return s.trim();
+  // Otherwise treat as bare payload.
+  return 'd=' + s;
+}
+
+async function main() {
+  const frag = window.location.hash.slice(1);
+  const d = extractPayload(frag);
+
+  if (!d) {
+    showMessage(
+      'paste a molecule URL to view',
+      'This viewer expects a payload in the URL fragment, e.g.<br><code>#d=&lt;base64url&gt;</code><br><br>Or click <b>paste</b> in the top-right.'
+    );
+    openPaste();
+    return;
+  }
+
+  let decoded;
+  try {
+    decoded = await decodeMolPayload(d);
+  } catch (e) {
+    showMessage('could not decode payload', escapeHtml(e.message), true);
+    return;
+  }
+
+  const viewer = $3Dmol.createViewer('viewer', { backgroundColor: 'white' });
+  const style = { stick: {}, sphere: { radius: 0.3 } };
+
+  if (decoded.mode === 'collection') {
+    setBadge(`collection · ${decoded.M} molecules`);
+    setupCollectionUI(viewer, decoded.molecules, style);
+    return;
+  }
+
+  const { N, F, atomicNumbers, frames } = decoded;
+  setBadge(F > 1 ? `${N} atoms · ${F} frames` : `${N} atoms`);
+
+  if (F === 1) {
+    viewer.addModel(frameToXYZ(atomicNumbers, frames[0]), 'xyz');
+    viewer.setStyle({}, style);
+    viewer.zoomTo();
+    viewer.render();
+    return;
+  }
+
+  // Multi-frame: load all frames once, switch via setFrame for smooth playback.
+  viewer.addModelsAsFrames(multiFrameXYZ(atomicNumbers, frames), 'xyz');
+  viewer.setStyle({}, style);
+  viewer.setFrame(0);
+  viewer.zoomTo();
+  viewer.render();
+
+  setupTrajectoryUI(viewer, F);
+}
+
+function setupCollectionUI(singleViewer, molecules, style) {
+  const controls = document.getElementById('coll-controls');
+  const prevBtn = document.getElementById('coll-prev');
+  const nextBtn = document.getElementById('coll-next');
+  const counter = document.getElementById('coll-counter');
+  const atomsEl = document.getElementById('coll-atoms');
+  const toggleBtn = document.getElementById('coll-view-toggle');
+  const viewerEl = document.getElementById('viewer');
+  const gridEl = document.getElementById('grid');
+  const labelsEl = document.getElementById('grid-labels');
+
+  controls.classList.add('on');
+
+  const M = molecules.length;
+  const GRID_ROWS = 3, GRID_COLS = 3;
+  const PAGE_SIZE = GRID_ROWS * GRID_COLS;
+  const PAGES = Math.ceil(M / PAGE_SIZE);
+
+  let mode = 'single';          // 'single' | 'grid'
+  let current = 0;              // current molecule index (single mode)
+  let page = 0;                 // current page index (grid mode)
+  let firstSingleRender = true;
+  let gridViewers = null;       // lazy-created 2D array of GLViewer
+
+  function showSingle() {
+    gridEl.classList.remove('on');
+    labelsEl.classList.remove('on');
+    viewerEl.style.display = '';
+    toggleBtn.textContent = '▦';
+    toggleBtn.title = 'Grid view (G)';
+  }
+  function showGrid() {
+    viewerEl.style.display = 'none';
+    gridEl.classList.add('on');
+    labelsEl.classList.add('on');
+    toggleBtn.textContent = '◻';
+    toggleBtn.title = 'Single view (G)';
+  }
+
+  function renderSingle() {
+    const mol = molecules[current];
+    singleViewer.removeAllModels();
+    singleViewer.addModel(
+      frameToXYZ(mol.atomicNumbers, mol.frames[0], `molecule ${current}`), 'xyz');
+    singleViewer.setStyle({}, style);
+    if (firstSingleRender) { singleViewer.zoomTo(); firstSingleRender = false; }
+    singleViewer.render();
+    counter.textContent = `molecule ${current + 1} / ${M}`;
+    atomsEl.textContent = `${mol.N} atoms`;
+  }
+
+  function ensureGrid() {
+    if (gridViewers) return;
+    // $3Dmol.createViewerGrid builds a single WebGL canvas split into rows×cols
+    // sub-viewers — one shared context, cheap to animate per-cell.
+    gridViewers = $3Dmol.createViewerGrid('grid',
+      { rows: GRID_ROWS, cols: GRID_COLS, control_all: false },
+      { backgroundColor: 'white' });
+    // HTML label overlay, one per cell, clickable to jump back to single view.
+    labelsEl.innerHTML = '';
+    for (let i = 0; i < PAGE_SIZE; i++) {
+      const div = document.createElement('div');
+      div.className = 'grid-label';
+      div.dataset.cell = String(i);
+      div.addEventListener('click', () => {
+        const idx = page * PAGE_SIZE + i;
+        if (idx >= M) return;
+        current = idx;
+        mode = 'single';
+        showSingle();
+        renderSingle();
+      });
+      labelsEl.appendChild(div);
+    }
+  }
+
+  function renderGrid() {
+    ensureGrid();
+    const start = page * PAGE_SIZE;
+    for (let i = 0; i < PAGE_SIZE; i++) {
+      const r = Math.floor(i / GRID_COLS);
+      const c = i % GRID_COLS;
+      const v = gridViewers[r][c];
+      const idx = start + i;
+      const label = labelsEl.children[i];
+      v.removeAllModels();
+      if (idx < M) {
+        const mol = molecules[idx];
+        v.addModel(frameToXYZ(mol.atomicNumbers, mol.frames[0]), 'xyz');
+        v.setStyle({}, style);
+        v.zoomTo();
+        label.textContent = `${idx + 1} · ${mol.N} atoms`;
+        label.classList.remove('empty');
+      } else {
+        label.classList.add('empty');
+      }
+      v.render();
+    }
+    const last = Math.min(start + PAGE_SIZE, M);
+    counter.textContent = PAGES > 1
+      ? `${start + 1}–${last} / ${M}   (page ${page + 1} / ${PAGES})`
+      : `${M} molecules`;
+    atomsEl.textContent = '';
+  }
+
+  function render() { mode === 'single' ? renderSingle() : renderGrid(); }
+
+  function next() {
+    if (mode === 'single') current = (current + 1) % M;
+    else                   page = (page + 1) % PAGES;
+    render();
+  }
+  function prev() {
+    if (mode === 'single') current = (current - 1 + M) % M;
+    else                   page = (page - 1 + PAGES) % PAGES;
+    render();
+  }
+  function toggleView() {
+    if (mode === 'single') {
+      mode = 'grid';
+      page = Math.floor(current / PAGE_SIZE);
+      showGrid();
+    } else {
+      mode = 'single';
+      showSingle();
+    }
+    render();
+  }
+
+  prevBtn.addEventListener('click', prev);
+  nextBtn.addEventListener('click', next);
+  toggleBtn.addEventListener('click', toggleView);
+  window.addEventListener('keydown', (e) => {
+    if (document.getElementById('paste-overlay').classList.contains('on')) return;
+    if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
+    if (e.code === 'ArrowRight')      { e.preventDefault(); next(); }
+    else if (e.code === 'ArrowLeft')  { e.preventDefault(); prev(); }
+    else if (e.code === 'KeyG')       { e.preventDefault(); toggleView(); }
+  });
+
+  showSingle();
+  render();
+}
+
+function setupTrajectoryUI(viewer, F) {
+  const controls = document.getElementById('controls');
+  const playBtn = document.getElementById('play');
+  const slider = document.getElementById('slider');
+  const counter = document.getElementById('counter');
+  const speedsEl = document.getElementById('speeds');
+
+  controls.classList.add('on');
+  slider.max = String(F - 1);
+
+  let current = 0;
+  let playing = false;
+  let speed = 1;
+  let timer = null;
+
+  const SPEEDS = [0.25, 0.5, 1, 2, 4];
+  const BASE_FPS = 10;
+
+  for (const s of SPEEDS) {
+    const b = document.createElement('button');
+    b.textContent = s + '×';
+    b.dataset.speed = String(s);
+    if (s === 1) b.classList.add('active');
+    b.addEventListener('click', () => setSpeed(s));
+    speedsEl.appendChild(b);
+  }
+
+  function render() {
+    viewer.setFrame(current);
+    viewer.render();
+    slider.value = String(current);
+    counter.textContent = `${current + 1} / ${F}`;
+  }
+
+  function setSpeed(s) {
+    speed = s;
+    for (const b of speedsEl.children) {
+      b.classList.toggle('active', Number(b.dataset.speed) === s);
+    }
+    if (playing) { stopTimer(); startTimer(); }
+  }
+
+  function startTimer() {
+    const interval = 1000 / (BASE_FPS * speed);
+    timer = setInterval(() => {
+      current = (current + 1) % F;
+      render();
+    }, interval);
+  }
+  function stopTimer() {
+    if (timer) { clearInterval(timer); timer = null; }
+  }
+
+  function play() {
+    if (playing) return;
+    playing = true;
+    playBtn.textContent = '❚❚';
+    startTimer();
+  }
+  function pause() {
+    if (!playing) return;
+    playing = false;
+    playBtn.textContent = '▶';
+    stopTimer();
+  }
+  function toggle() { playing ? pause() : play(); }
+
+  playBtn.addEventListener('click', toggle);
+
+  slider.addEventListener('input', () => {
+    current = Number(slider.value);
+    render();
+  });
+  slider.addEventListener('mousedown', pause);
+  slider.addEventListener('touchstart', pause, { passive: true });
+
+  window.addEventListener('keydown', (e) => {
+    if (document.getElementById('paste-overlay').classList.contains('on')) return;
+    if (e.target.tagName === 'TEXTAREA') return;
+    if (e.target.tagName === 'INPUT' && e.target !== slider) return;
+    if (e.code === 'Space') {
+      e.preventDefault();
+      toggle();
+    } else if (e.code === 'ArrowRight') {
+      e.preventDefault();
+      pause();
+      current = (current + 1) % F;
+      render();
+    } else if (e.code === 'ArrowLeft') {
+      e.preventDefault();
+      pause();
+      current = (current - 1 + F) % F;
+      render();
+    }
+  });
+
+  render();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[c]);
+}
+
+// ---- paste overlay ----
+function openPaste() {
+  const ov = document.getElementById('paste-overlay');
+  const input = document.getElementById('paste-input');
+  ov.classList.add('on');
+  // Seed with the current fragment so users can tweak, not just replace.
+  input.value = window.location.hash.slice(1) || '';
+  input.focus();
+  input.select();
+}
+function closePaste() {
+  document.getElementById('paste-overlay').classList.remove('on');
+}
+function submitPaste() {
+  const raw = document.getElementById('paste-input').value;
+  const normalized = normalizePasted(raw);
+  if (!normalized) return;
+  const next = '#' + normalized;
+  // Same-hash assignment doesn't fire hashchange, so force a reload in that
+  // case; otherwise let hashchange → reload handle it.
+  if (window.location.hash === next) {
+    window.location.reload();
+  } else {
+    window.location.hash = next;
+  }
+}
+
+document.getElementById('paste-btn').addEventListener('click', openPaste);
+document.getElementById('paste-cancel').addEventListener('click', closePaste);
+document.getElementById('paste-submit').addEventListener('click', submitPaste);
+document.getElementById('paste-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'paste-overlay') closePaste();
+});
+document.getElementById('paste-input').addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault();
+    submitPaste();
+  }
+});
+window.addEventListener('keydown', (e) => {
+  const overlayOn = document.getElementById('paste-overlay').classList.contains('on');
+  if (e.key === 'Escape' && overlayOn) {
+    e.preventDefault();
+    closePaste();
+    return;
+  }
+  // 'p' opens paste unless focus is in an input/textarea.
+  if (e.key === 'p' && !overlayOn
+      && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA'
+      && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    openPaste();
+  }
+});
+
+window.addEventListener('hashchange', () => window.location.reload());
+main();
+</script>
+</body>
+</html>
